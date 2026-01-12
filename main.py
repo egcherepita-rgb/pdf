@@ -15,7 +15,7 @@ except Exception:
     openpyxl = None
 
 
-app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.6.4")
+app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.6.5")
 
 # -------------------------
 # Regex
@@ -28,7 +28,7 @@ RX_MONEY_LINE = re.compile(r"^\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?\s*₽$")
 RX_INT = re.compile(r"^\d+$")
 RX_ANY_RUB = re.compile(r"₽")
 
-# NEW: price ₽  qty  sum ₽ (в одной строке)
+# price ₽  qty  sum ₽ (в одной строке)
 RX_PRICE_QTY_SUM = re.compile(
     r"(?P<price>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽\s+"
     r"(?P<qty>\d{1,4})\s+"
@@ -148,8 +148,25 @@ def is_totals_block(line: str) -> bool:
     )
 
 
+def money_to_number(line: str) -> int:
+    # "40 347 ₽" -> 40347
+    s = normalize_space(line).replace("₽", "").strip()
+    s = s.replace("\u00a0", " ")
+    s = s.replace(" ", "")
+    s = s.replace(",", ".")
+    try:
+        return int(float(s))
+    except Exception:
+        return -1
+
+
 def is_project_total_only(line: str) -> bool:
-    return bool(re.fullmatch(r"\d+\s*₽", normalize_space(line)))
+    # ВАЖНО: не путать "450 ₽" (цена позиции) с итогом проекта "40347 ₽"
+    # Считаем "итогом" только крупные суммы (10 000+ ₽).
+    if not RX_MONEY_LINE.fullmatch(normalize_space(line)):
+        return False
+    v = money_to_number(line)
+    return v >= 10000
 
 
 def is_header_token(line: str) -> bool:
@@ -195,7 +212,6 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
 
     ordered = OrderedDict()
     buf: List[str] = []
-    in_totals = False
 
     stats = {
         "pages": 0,
@@ -209,6 +225,10 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
         lines = split_lines(page)
         if not lines:
             continue
+
+        # ВАЖНО: итоги считаем локально для страницы (чтобы последняя страница не ломала остальные)
+        in_totals = False
+        buf.clear()
 
         i = 0
         while i < len(lines):
@@ -228,9 +248,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # -----------------------------
             # NEW: anchor в одной строке: "... 450 ₽ 1 450 ₽"
-            # -----------------------------
             m = RX_PRICE_QTY_SUM.search(line)
             if m:
                 name = clean_name_from_buffer(buf)
@@ -249,11 +267,9 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # -----------------------------
             # OLD: anchor: money -> qty -> money (в разных строках)
-            # -----------------------------
             if RX_MONEY_LINE.fullmatch(line):
-                end = min(len(lines), i + 10)
+                end = min(len(lines), i + 12)
 
                 qty_idx = None
                 for j in range(i + 1, end):
@@ -420,7 +436,6 @@ HOME_HTML = "\n".join([
     "    const modal = document.getElementById('modal');",
     "    const closeBtn = document.getElementById('close');",
     "",
-    "    // покажем блок помощи, если картинка доступна",
     "    fetch('/instruction.jpg', { method: 'HEAD' }).then(r => { if (r.ok) help.style.display = 'block'; });",
     "",
     "    function ok(msg){ statusEl.className='status ok'; statusEl.textContent=msg; }",
