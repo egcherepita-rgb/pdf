@@ -15,7 +15,7 @@ except Exception:
     openpyxl = None
 
 
-app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.6.3")
+app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.6.4")
 
 # -------------------------
 # Regex
@@ -27,6 +27,14 @@ RX_WEIGHT = re.compile(r"\b\d+(?:[.,]\d+)?\s*кг\.?\b", re.IGNORECASE)
 RX_MONEY_LINE = re.compile(r"^\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?\s*₽$")
 RX_INT = re.compile(r"^\d+$")
 RX_ANY_RUB = re.compile(r"₽")
+
+# NEW: price ₽  qty  sum ₽ (в одной строке)
+RX_PRICE_QTY_SUM = re.compile(
+    r"(?P<price>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽\s+"
+    r"(?P<qty>\d{1,4})\s+"
+    r"(?P<sum>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽",
+    re.IGNORECASE,
+)
 
 RX_DIMS_ANYWHERE = re.compile(
     r"\s*\d{1,4}[xх×]\d{1,4}(?:[xх×]\d{1,5})?\s*мм\.?\s*",
@@ -220,7 +228,30 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # anchor: money -> qty -> money
+            # -----------------------------
+            # NEW: anchor в одной строке: "... 450 ₽ 1 450 ₽"
+            # -----------------------------
+            m = RX_PRICE_QTY_SUM.search(line)
+            if m:
+                name = clean_name_from_buffer(buf)
+                buf.clear()
+
+                if name:
+                    try:
+                        qty = int(m.group("qty"))
+                    except Exception:
+                        qty = 0
+
+                    if 1 <= qty <= 500:
+                        ordered[name] = ordered.get(name, 0) + qty
+                        stats["items_found"] += 1
+
+                i += 1
+                continue
+
+            # -----------------------------
+            # OLD: anchor: money -> qty -> money (в разных строках)
+            # -----------------------------
             if RX_MONEY_LINE.fullmatch(line):
                 end = min(len(lines), i + 10)
 
@@ -487,7 +518,7 @@ async def extract(file: UploadFile = File(...)):
     if not rows:
         raise HTTPException(
             status_code=422,
-            detail=f"Не удалось найти позиции по шаблону (деньги ₽ → кол-во → деньги ₽). debug={stats}",
+            detail=f"Не удалось найти позиции по шаблону (деньги ₽ → кол-во → деньги ₽ или в одной строке). debug={stats}",
         )
 
     csv_bytes = make_csv_excel_friendly(rows)
